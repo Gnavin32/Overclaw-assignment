@@ -1,0 +1,323 @@
+import { useState, useRef, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
+type Message = {
+  role: "user" | "ai";
+  text: string;
+};
+
+type Agent = {
+  id: number;
+  name: string;
+  description: string;
+  openclaw_task: string;
+  schedule: string;
+  status: string;
+};
+
+type Approval = {
+  id: number;
+  agent_id: number;
+  content: string;
+  status: string;
+};
+
+type Log = {
+  id: number;
+  agent_id: number;
+  timestamp: string;
+  message: string;
+  level: string;
+};
+
+function App() {
+  const [input, setInput] = useState("");
+  const [messages, setMessages] = useState<Message[]>([
+    { role: "ai", text: "👋 Hello! I am your Personaliz AI Assistant. Tell me to 'create agent trending' or 'create agent hashtag' to start!" },
+  ]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [logs, setLogs] = useState<Log[]>([]);
+  const [view, setView] = useState<"chat" | "agents" | "approvals" | "logs" | "settings">("chat");
+  const [isOpen, setIsOpen] = useState(true);
+  const [apiKey, setApiKey] = useState<string>("");
+
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    loadAgents();
+    loadApprovals();
+    loadLogs();
+    loadSettings();
+    const interval = setInterval(() => {
+      loadApprovals();
+      loadLogs();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  async function loadSettings() {
+    try {
+      const key = await invoke<string | null>("get_llm_settings");
+      if (key) setApiKey(key);
+    } catch (e) {
+      console.error("Failed to load settings", e);
+    }
+  }
+
+  async function saveApiKey() {
+    try {
+      await invoke("update_llm_settings", { key: apiKey });
+      await invoke("log_event_cmd", { message: "LLM API Key updated. Switching to external model.", level: "Info" });
+      alert("Settings saved!");
+    } catch (e) {
+      alert("Failed to save settings: " + e);
+    }
+  }
+
+  async function loadAgents() {
+    try {
+      const data = await invoke<Agent[]>("get_agents");
+      setAgents(data);
+    } catch (e) {
+      console.error("Failed to load agents", e);
+    }
+  }
+
+  async function loadApprovals() {
+    try {
+      const data = await invoke<Approval[]>("get_approvals");
+      setApprovals(data);
+    } catch (e) {
+      console.error("Failed to load approvals", e);
+    }
+  }
+
+  async function loadLogs() {
+    try {
+      const data = await invoke<Log[]>("get_logs");
+      setLogs(data);
+    } catch (e) {
+      console.error("Failed to load logs", e);
+    }
+  }
+
+  async function handleApprove(id: number, approved: boolean) {
+    try {
+      await invoke("approve_request", { id, approved });
+      loadApprovals();
+      loadLogs();
+    } catch (e) {
+      console.error("Failed to approve", e);
+    }
+  }
+
+  async function sendMessage() {
+    if (!input.trim()) return;
+
+    const userMsg = input;
+    setMessages((m) => [...m, { role: "user", text: userMsg }]);
+    setInput("");
+
+    // Simple Command Parsing logic
+    if (userMsg.toLowerCase().includes("trending")) {
+      try {
+        await invoke("create_agent", { name: "Trending LinkedIn Agent", task: "Trending LinkedIn Post", schedule: "Daily" });
+        setMessages((m) => [...m, { role: "ai", text: `✅ Trending Agent created!` }]);
+        loadAgents();
+      } catch (e) {
+        setMessages((m) => [...m, { role: "ai", text: `❌ Error: ${e}` }]);
+      }
+      return;
+    }
+
+    if (userMsg.toLowerCase().includes("hashtag")) {
+      try {
+        await invoke("create_agent", { name: "Hashtag Comment Agent", task: "LinkedIn #openclaw comment", schedule: "Hourly" });
+        setMessages((m) => [...m, { role: "ai", text: `✅ Hashtag Agent created!` }]);
+        loadAgents();
+      } catch (e) {
+        setMessages((m) => [...m, { role: "ai", text: `❌ Error: ${e}` }]);
+      }
+      return;
+    }
+
+    try {
+      let responseText = "";
+      if (apiKey) {
+        // External Provider (Mock/Proxy)
+        setMessages((m) => [...m, { role: "ai", text: "📡 Using external LLM model..." }]);
+        const res = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`
+          },
+          body: JSON.stringify({
+            model: "gpt-3.5-turbo",
+            messages: [{ role: "user", content: userMsg }]
+          })
+        });
+        const data = await res.json();
+        responseText = data.choices[0].message.content;
+      } else {
+        // Local model
+        const res = await fetch("http://localhost:11434/api/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "phi3",
+            prompt: userMsg,
+            stream: false,
+          }),
+        });
+        const data = await res.json();
+        responseText = data.response;
+      }
+
+      setMessages((m) => [...m, { role: "ai", text: responseText || "No response." }]);
+    } catch (e) {
+      setMessages((m) => [...m, { role: "ai", text: `⚠️ LLM Error: ${e}. Ensure Ollama is running if using local model.` }]);
+      await invoke("log_event_cmd", { message: `LLM Error: ${e}`, level: "Error" });
+    }
+  }
+
+  if (!isOpen) {
+    return (
+      <div onClick={() => setIsOpen(true)} style={{ position: "fixed", bottom: "20px", right: "20px", width: "60px", height: "60px", background: "#3b82f6", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "0 4px 12px rgba(0,0,0,0.3)", zIndex: 1000, fontSize: "30px" }}>
+        🧠
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ height: "100vh", display: "flex", background: "#0f172a", color: "white", fontFamily: "Inter, sans-serif" }}>
+      {/* Sidebar */}
+      <div style={{ width: "240px", background: "#1e293b", padding: "20px", display: "flex", flexDirection: "column", gap: "10px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h1 style={{ fontSize: "20px", fontWeight: "bold" }}>🧠 Personaliz</h1>
+          <button onClick={() => setIsOpen(false)} style={{ background: "transparent", border: "none", color: "white", cursor: "pointer", fontSize: "18px" }}>×</button>
+        </div>
+        <button onClick={() => setView("chat")} style={sidebarButtonStyle(view === "chat")}>💬 Assistant</button>
+        <button onClick={() => setView("agents")} style={sidebarButtonStyle(view === "agents")}>🤖 My Agents ({agents.length})</button>
+        <button onClick={() => setView("approvals")} style={sidebarButtonStyle(view === "approvals")}>⏳ Approvals ({approvals.length})</button>
+        <button onClick={() => setView("logs")} style={sidebarButtonStyle(view === "logs")}>📜 Activity Logs</button>
+        <div style={{ flex: 1 }}></div>
+        <button onClick={() => setView("settings")} style={sidebarButtonStyle(view === "settings")}>⚙️ Settings</button>
+      </div>
+
+      {/* Main Content */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#0f172a" }}>
+        {view === "chat" && (
+          <>
+            <div style={{ flex: 1, overflowY: "auto", padding: "20px", display: "flex", flexDirection: "column", gap: "12px" }}>
+              {messages.map((msg, i) => (
+                <div key={i} style={{
+                  alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
+                  background: msg.role === "user" ? "#3b82f6" : "#334155",
+                  padding: "10px 14px", borderRadius: "12px", maxWidth: "80%"
+                }}>
+                  {msg.text}
+                </div>
+              ))}
+              <div ref={chatEndRef}></div>
+            </div>
+            <div style={{ padding: "20px", display: "flex", gap: "10px", borderTop: "1px solid #334155" }}>
+              <input value={input} onChange={(e) => setInput(e.target.value)}
+                placeholder="Tell me to create an agent..."
+                style={{ flex: 1, padding: "12px", borderRadius: "8px", border: "none", background: "#1e293b", color: "white" }} />
+              <button onClick={sendMessage} style={{ padding: "12px 20px", borderRadius: "8px", border: "none", background: "#3b82f6", color: "white", fontWeight: "bold" }}>Send</button>
+            </div>
+          </>
+        )}
+
+        {view === "agents" && (
+          <div style={{ padding: "30px" }}>
+            <h2>🤖 My Active Agents</h2>
+            <div style={{ display: "grid", gap: "15px", marginTop: "20px" }}>
+              {agents.map(a => (
+                <div key={a.id} style={{ background: "#1e293b", padding: "15px", borderRadius: "10px", border: "1px solid #334155" }}>
+                  <div style={{ fontWeight: "bold" }}>{a.name}</div>
+                  <div style={{ fontSize: "14px", opacity: 0.7 }}>{a.openclaw_task}</div>
+                  <div style={{ marginTop: "10px", fontSize: "12px", background: "#065f46", display: "inline-block", padding: "2px 8px", borderRadius: "4px" }}>{a.status}</div>
+                </div>
+              ))}
+              {agents.length === 0 && <div>No agents created yet. Ask the assistant to create one!</div>}
+            </div>
+          </div>
+        )}
+
+        {view === "approvals" && (
+          <div style={{ padding: "30px" }}>
+            <h2>⏳ Pending Approvals</h2>
+            <div style={{ display: "grid", gap: "15px", marginTop: "20px" }}>
+              {approvals.map(a => (
+                <div key={a.id} style={{ background: "#1e293b", padding: "15px", borderRadius: "10px", border: "1px solid #334155" }}>
+                  <div style={{ fontWeight: "bold" }}>Approval Request</div>
+                  <p style={{ margin: "10px 0" }}>{a.content}</p>
+                  <div style={{ display: "flex", gap: "10px" }}>
+                    <button onClick={() => handleApprove(a.id, true)} style={{ background: "#10b981", color: "white", padding: "5px 15px", borderRadius: "5px", border: "none" }}>Approve & Post</button>
+                    <button onClick={() => handleApprove(a.id, false)} style={{ background: "#ef4444", color: "white", padding: "5px 15px", borderRadius: "5px", border: "none" }}>Reject</button>
+                  </div>
+                </div>
+              ))}
+              {approvals.length === 0 && <div>No pending approvals.</div>}
+            </div>
+          </div>
+        )}
+
+        {view === "logs" && (
+          <div style={{ padding: "30px" }}>
+            <h2>📜 Activity Logs</h2>
+            <div style={{ marginTop: "20px", display: "flex", flexDirection: "column", gap: "10px" }}>
+              {logs.map(l => (
+                <div key={l.id} style={{ fontSize: "13px", padding: "8px", borderBottom: "1px solid #334155" }}>
+                  <span style={{ opacity: 0.5 }}>[{l.timestamp}]</span> <span style={{ color: l.level === "Error" ? "#ef4444" : "#10b981" }}>{l.level}</span>: {l.message}
+                </div>
+              ))}
+              {logs.length === 0 && <div>No activity logged yet.</div>}
+            </div>
+          </div>
+        )}
+        {view === "settings" && (
+          <div style={{ padding: "30px" }}>
+            <h2>⚙️ System Settings</h2>
+            <div style={{ marginTop: "20px", display: "flex", flexDirection: "column", gap: "20px" }}>
+              <div style={{ background: "#1e293b", padding: "20px", borderRadius: "10px", border: "1px solid #334155" }}>
+                <h3 style={{ marginTop: 0 }}>LLM Configuration</h3>
+                <p style={{ opacity: 0.7, fontSize: "14px" }}>Provide an API key to switch from local Phi-3 to an external provider.</p>
+                <div style={{ display: "flex", gap: "10px", marginTop: "15px" }}>
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="Enter API Key (OpenAI/Claude)..."
+                    style={{ flex: 1, padding: "10px", borderRadius: "5px", border: "none", background: "#0f172a", color: "white" }}
+                  />
+                  <button onClick={saveApiKey} style={{ padding: "10px 20px", background: "#3b82f6", border: "none", borderRadius: "5px", color: "white", fontWeight: "bold", cursor: "pointer" }}>Save</button>
+                </div>
+                {!apiKey && <p style={{ color: "#10b981", fontSize: "12px", marginTop: "10px" }}>✅ Currently using Local LLM (Phi-3)</p>}
+                {apiKey && <p style={{ color: "#3b82f6", fontSize: "12px", marginTop: "10px" }}>📡 Currently using External Model Provider</p>}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function sidebarButtonStyle(active: boolean) {
+  return {
+    padding: "10px 15px",
+    borderRadius: "8px",
+    border: "none",
+    background: active ? "#3b82f6" : "transparent",
+    color: "white",
+    textAlign: "left" as const,
+    cursor: "pointer",
+    fontWeight: active ? "bold" : "normal",
+  };
+}
+
+export default App;
