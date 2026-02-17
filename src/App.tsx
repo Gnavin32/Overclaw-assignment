@@ -30,6 +30,17 @@ type Log = {
   level: string;
 };
 
+type EnvInfo = {
+  os: string;
+  has_node: boolean;
+  has_pnpm: boolean;
+  has_openclaw: boolean;
+  has_ollama: boolean;
+  has_playwright: boolean;
+};
+
+type SetupStep = "checking_env" | "installing_openclaw" | "llm_choice" | "api_key_input" | "ollama_check" | "phi3_pulling" | "creating_agent" | "done" | "error";
+
 function App() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([
@@ -41,6 +52,9 @@ function App() {
   const [view, setView] = useState<"chat" | "agents" | "approvals" | "logs" | "settings">("chat");
   const [isOpen, setIsOpen] = useState(true);
   const [apiKey, setApiKey] = useState<string>("");
+  const [setupStep, setSetupStep] = useState<SetupStep | null>(null);
+  const [setupError, setSetupError] = useState<string>("");
+  const [pendingAgent, setPendingAgent] = useState<{ name: string, task: string, schedule: string } | null>(null);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -119,33 +133,17 @@ function App() {
     setMessages((m) => [...m, { role: "user", text: userMsg }]);
     setInput("");
 
-    // Simple Command Parsing logic
-    if (userMsg.toLowerCase().includes("trending")) {
-      try {
-        await invoke("create_agent", { name: "Trending LinkedIn Agent", task: "Trending LinkedIn Post", schedule: "Daily" });
-        setMessages((m) => [...m, { role: "ai", text: `✅ Trending Agent created!` }]);
-        loadAgents();
-      } catch (e) {
-        setMessages((m) => [...m, { role: "ai", text: `❌ Error: ${e}` }]);
-      }
+    // Check if user is asking to create an agent
+    if (userMsg.toLowerCase().includes("create agent") || userMsg.toLowerCase().includes("trending") || userMsg.toLowerCase().includes("hashtag")) {
+      setMessages((m) => [...m, { role: "ai", text: "🔍 Checking environment for agent creation..." }]);
+      startSetupFlow(userMsg);
       return;
     }
 
-    if (userMsg.toLowerCase().includes("hashtag")) {
-      try {
-        await invoke("create_agent", { name: "Hashtag Comment Agent", task: "LinkedIn #openclaw comment", schedule: "Hourly" });
-        setMessages((m) => [...m, { role: "ai", text: `✅ Hashtag Agent created!` }]);
-        loadAgents();
-      } catch (e) {
-        setMessages((m) => [...m, { role: "ai", text: `❌ Error: ${e}` }]);
-      }
-      return;
-    }
-
+    // Normal chat flow
     try {
       let responseText = "";
       if (apiKey) {
-        // External Provider (Mock/Proxy)
         setMessages((m) => [...m, { role: "ai", text: "📡 Using external LLM model..." }]);
         const res = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
@@ -161,7 +159,6 @@ function App() {
         const data = await res.json();
         responseText = data.choices[0].message.content;
       } else {
-        // Local model
         const res = await fetch("http://localhost:11434/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -174,11 +171,78 @@ function App() {
         const data = await res.json();
         responseText = data.response;
       }
-
       setMessages((m) => [...m, { role: "ai", text: responseText || "No response." }]);
     } catch (e) {
       setMessages((m) => [...m, { role: "ai", text: `⚠️ LLM Error: ${e}. Ensure Ollama is running if using local model.` }]);
       await invoke("log_event_cmd", { message: `LLM Error: ${e}`, level: "Error" });
+    }
+  }
+
+  async function startSetupFlow(userMsg: string) {
+    let agentParams = { name: "Custom Agent", task: userMsg, schedule: "Manual" };
+    if (userMsg.toLowerCase().includes("trending")) {
+      agentParams = { name: "Trending LinkedIn Agent", task: "Trending LinkedIn Post", schedule: "Daily" };
+    } else if (userMsg.toLowerCase().includes("hashtag")) {
+      agentParams = { name: "Hashtag Comment Agent", task: "LinkedIn #openclaw comment", schedule: "Hourly" };
+    }
+
+    setPendingAgent(agentParams);
+    setSetupStep("checking_env");
+
+    try {
+      const env = await invoke<EnvInfo>("detect_env");
+      if (!env.has_openclaw) {
+        setSetupStep("installing_openclaw");
+        await invoke("install_openclaw");
+      }
+      setSetupStep("llm_choice");
+    } catch (e) {
+      setSetupError(String(e));
+      setSetupStep("error");
+    }
+  }
+
+  async function handleLlmChoice(choice: "local" | "external") {
+    if (choice === "external") {
+      setSetupStep("api_key_input");
+    } else {
+      setSetupStep("ollama_check");
+      try {
+        const running = await invoke<boolean>("check_ollama");
+        if (!running) {
+          setSetupError("Ollama is not running. Please start Ollama and try again.");
+          setSetupStep("error");
+          return;
+        }
+        setSetupStep("phi3_pulling");
+        await invoke("ensure_phi3");
+        finishSetup();
+      } catch (e) {
+        setSetupError(String(e));
+        setSetupStep("error");
+      }
+    }
+  }
+
+  async function handleApiKeySubmit(key: string) {
+    setApiKey(key);
+    await invoke("update_llm_settings", { key });
+    finishSetup();
+  }
+
+  async function finishSetup() {
+    if (!pendingAgent) return;
+    setSetupStep("creating_agent");
+    try {
+      await invoke("create_agent", pendingAgent);
+      setMessages((m) => [...m, { role: "ai", text: `✅ Agent '${pendingAgent.name}' created successfully after setup!` }]);
+      setSetupStep("done");
+      setPendingAgent(null);
+      loadAgents();
+      setTimeout(() => setSetupStep(null), 2000);
+    } catch (e) {
+      setSetupError(String(e));
+      setSetupStep("error");
     }
   }
 
@@ -279,6 +343,7 @@ function App() {
             </div>
           </div>
         )}
+
         {view === "settings" && (
           <div style={{ padding: "30px" }}>
             <h2>⚙️ System Settings</h2>
@@ -303,6 +368,50 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Setup Wizard Overlay */}
+      {setupStep && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2000 }}>
+          <div style={{ background: "#1e293b", padding: "30px", borderRadius: "15px", maxWidth: "400px", width: "90%", border: "1px solid #3b82f6", textAlign: "center" }}>
+            <h2 style={{ marginBottom: "20px" }}>🚀 Agent Setup Wizard</h2>
+
+            {setupStep === "checking_env" && <p>🔍 Checking your environment...</p>}
+            {setupStep === "installing_openclaw" && <p>📦 Installing OpenClaw globally... This may take a moment.</p>}
+
+            {setupStep === "llm_choice" && (
+              <div>
+                <p>Which LLM module would you like to use for this agent?</p>
+                <div style={{ display: "flex", gap: "10px", marginTop: "20px" }}>
+                  <button onClick={() => handleLlmChoice("local")} style={wizardButtonStyle}>🏠 Local (Phi-3)</button>
+                  <button onClick={() => handleLlmChoice("external")} style={wizardButtonStyle}>📡 External (API Key)</button>
+                </div>
+              </div>
+            )}
+
+            {setupStep === "api_key_input" && (
+              <div>
+                <p>Please provide your API Key (OpenAI/Claude):</p>
+                <input type="password" onKeyDown={(e) => e.key === "Enter" && handleApiKeySubmit((e.target as HTMLInputElement).value)}
+                  style={{ width: "100%", padding: "10px", marginTop: "10px", borderRadius: "5px", border: "none", background: "#0f172a", color: "white" }}
+                  placeholder="Paste key and press Enter" />
+              </div>
+            )}
+
+            {setupStep === "ollama_check" && <p>🤖 Verifying Ollama is running...</p>}
+            {setupStep === "phi3_pulling" && <p>📥 Pulling Phi-3 model... (This can take a few minutes if first time)</p>}
+            {setupStep === "creating_agent" && <p>🤖 Finalizing agent creation...</p>}
+            {setupStep === "done" && <p style={{ color: "#10b981" }}>✅ Everything is ready! Agent created.</p>}
+
+            {setupStep === "error" && (
+              <div>
+                <p style={{ color: "#ef4444" }}>❌ Error during setup:</p>
+                <p style={{ fontSize: "14px", opacity: 0.8 }}>{setupError}</p>
+                <button onClick={() => setSetupStep(null)} style={{ ...wizardButtonStyle, marginTop: "15px" }}>Close</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -319,5 +428,16 @@ function sidebarButtonStyle(active: boolean) {
     fontWeight: active ? "bold" : "normal",
   };
 }
+
+const wizardButtonStyle = {
+  flex: 1,
+  padding: "12px",
+  borderRadius: "8px",
+  border: "none",
+  background: "#3b82f6",
+  color: "white",
+  fontWeight: "bold" as const,
+  cursor: "pointer"
+};
 
 export default App;

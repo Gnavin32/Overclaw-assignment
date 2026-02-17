@@ -2,6 +2,9 @@ mod db;
 use rusqlite::OptionalExtension;
 mod openclaw;
 mod scheduler;
+mod commands;
+
+use commands::{detect_env, install_openclaw, check_ollama, ensure_phi3};
 
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
@@ -9,7 +12,7 @@ use db::{DbState, Agent, Log, Approval};
 use scheduler::start_scheduler;
 
 #[tauri::command]
-fn get_agents(state: State<DbState>) -> Result<Vec<Agent>, String> {
+fn get_agents(state: State<DbState>) -> std::result::Result<Vec<Agent>, String> {
     let conn = state.0.lock().unwrap();
     let mut stmt = conn.prepare("SELECT id, name, description, openclaw_task, schedule, status, last_run_at, next_run_at FROM agents").map_err(|e| e.to_string())?;
     let agent_iter = stmt.query_map([], |row| {
@@ -33,7 +36,7 @@ fn get_agents(state: State<DbState>) -> Result<Vec<Agent>, String> {
 }
 
 #[tauri::command]
-fn create_agent(state: State<DbState>, name: String, task: String, schedule: String) -> Result<(), String> {
+fn create_agent(state: State<DbState>, name: String, task: String, schedule: String) -> std::result::Result<(), String> {
     let conn = state.0.lock().unwrap();
     conn.execute(
         "INSERT INTO agents (name, openclaw_task, schedule) VALUES (?, ?, ?)",
@@ -43,7 +46,7 @@ fn create_agent(state: State<DbState>, name: String, task: String, schedule: Str
 }
 
 #[tauri::command]
-fn get_logs(state: State<DbState>) -> Result<Vec<Log>, String> {
+fn get_logs(state: State<DbState>) -> std::result::Result<Vec<Log>, String> {
     let conn = state.0.lock().unwrap();
     let mut stmt = conn.prepare("SELECT id, agent_id, timestamp, message, level FROM logs ORDER BY timestamp DESC LIMIT 50").map_err(|e| e.to_string())?;
     let log_iter = stmt.query_map([], |row| {
@@ -64,7 +67,7 @@ fn get_logs(state: State<DbState>) -> Result<Vec<Log>, String> {
 }
 
 #[tauri::command]
-fn get_approvals(state: State<DbState>) -> Result<Vec<Approval>, String> {
+fn get_approvals(state: State<DbState>) -> std::result::Result<Vec<Approval>, String> {
     let conn = state.0.lock().unwrap();
     let mut stmt = conn.prepare("SELECT id, agent_id, content, status FROM approvals WHERE status = 'Pending'").map_err(|e| e.to_string())?;
     let app_iter = stmt.query_map([], |row| {
@@ -84,7 +87,7 @@ fn get_approvals(state: State<DbState>) -> Result<Vec<Approval>, String> {
 }
 
 #[tauri::command]
-fn approve_request(state: State<DbState>, id: i32, approved: bool) -> Result<(), String> {
+fn approve_request(state: State<DbState>, id: i32, approved: bool) -> std::result::Result<(), String> {
     let (content, current_status) = {
         let conn = state.0.lock().unwrap();
         let mut stmt = conn.prepare("SELECT content, status FROM approvals WHERE id = ?").map_err(|e| e.to_string())?;
@@ -110,22 +113,22 @@ fn approve_request(state: State<DbState>, id: i32, approved: bool) -> Result<(),
 }
 
 #[tauri::command]
-fn log_event_cmd(state: State<DbState>, agent_id: Option<i32>, message: String, level: String) -> Result<(), String> {
+fn log_event_cmd(state: State<DbState>, agent_id: Option<i32>, message: String, level: String) -> std::result::Result<(), String> {
     let conn = state.0.lock().unwrap();
     db::log_event(&conn, agent_id, &message, &level).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn get_llm_settings(state: State<DbState>) -> Result<Option<String>, String> {
+fn get_llm_settings(state: State<DbState>) -> std::result::Result<Option<String>, String> {
     let conn = state.0.lock().unwrap();
     let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = 'llm_api_key'").map_err(|e| e.to_string())?;
-    let res = stmt.query_row([], |row| row.get::<_, String>(0)).optional().map_err(|e| e.to_string())?;
+    let res = stmt.query_row([], |row| row.get::<_, String>(0)).optional().map_err(|e: rusqlite::Error| e.to_string())?;
     Ok(res)
 }
 
 #[tauri::command]
-fn update_llm_settings(state: State<DbState>, key: String) -> Result<(), String> {
+fn update_llm_settings(state: State<DbState>, key: String) -> std::result::Result<(), String> {
     let conn = state.0.lock().unwrap();
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('llm_api_key', ?)",
@@ -165,7 +168,11 @@ pub fn run() {
             approve_request,
             log_event_cmd,
             get_llm_settings,
-            update_llm_settings
+            update_llm_settings,
+            detect_env,
+            install_openclaw,
+            check_ollama,
+            ensure_phi3
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
